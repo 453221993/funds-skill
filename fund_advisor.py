@@ -581,6 +581,8 @@ def generate_suggestion(nav: Optional[dict], idx: Optional[dict],
     """
     score = 50.0
     bull, bear = [], []
+    rsi_adj = 0.0   # initialised for stock moderation block
+    ma_adj = 0.0
 
     if nav and "error" not in nav:
         t = nav["trend"]
@@ -682,14 +684,15 @@ def generate_suggestion(nav: Optional[dict], idx: Optional[dict],
         elif idx_trend in ("strong_down", "down"):
             score -= 5; bear.append("指数下行趋势")
 
-    # ── Stock signals (continuous) ────────────────────────────────────
+    # ── Stock signals (active funds: heavier weight, moderates NAV) ──
+    stock_avg = 50.0
+    stock_healthy = False
+    stock_sick = False
     if stocks:
         ss = []
         for sr in stocks.values():
             s = 50.0
-            # Continuous RSI
-            s += (50 - sr["rsi"]) * 0.5
-            # Graduated trend
+            s += (50 - sr["rsi"]) * 0.5           # continuous RSI
             t_s = sr["trend"]
             if t_s == "strong_up": s += 12
             elif t_s == "up": s += 8
@@ -697,14 +700,34 @@ def generate_suggestion(nav: Optional[dict], idx: Optional[dict],
             elif t_s == "down": s -= 8
             ss.append(s)
         if ss:
-            avg = sum(ss) / len(ss)
-            score += (avg - 50) * 0.5
+            stock_avg = sum(ss) / len(ss)
+            total = len(ss)
             up_n = sum(1 for s in ss if s > 55)
             down_n = sum(1 for s in ss if s < 45)
-            if up_n > down_n:
-                bull.append(f"{up_n}/{len(ss)} stocks bullish")
-            elif down_n > up_n:
-                bear.append(f"{down_n}/{len(ss)} stocks bearish")
+            stock_healthy = (up_n / total) >= 0.5   # ≥50% stocks bullish
+            stock_sick = (down_n / total) >= 0.5     # ≥50% stocks bearish
+
+            # Stock health moderates NAV overbought penalties:
+            # If most holdings are healthy while NAV looks "overbought",
+            # the manager is picking winners — don't penalize.
+            if stock_healthy and fund_type == "active":
+                # Walk back some NAV penalty if stocks disagree
+                if rsi_adj < 0:
+                    score -= rsi_adj       # undo full RSI penalty
+                    rsi_adj *= 0.3         # re-apply at 30%
+                    score += rsi_adj
+                if ma_adj < 0:
+                    score -= ma_adj
+                    ma_adj *= 0.3
+                    score += ma_adj
+
+            # Stock contribution (full weight — equal to NAV signals)
+            score += (stock_avg - 50) * 1.0
+
+            if stock_healthy:
+                bull.append(f"{up_n}/{total} stocks healthy  -> NAV过热不适用")
+            elif stock_sick:
+                bear.append(f"{down_n}/{total} stocks weak")
 
     # ── News / sentiment (unchanged continuous input) ──────────────────
     if news and news.get("matched_count", 0) > 0:
