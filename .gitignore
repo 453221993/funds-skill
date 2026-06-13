@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Sensitive - API keys
+.env
+*.key
+
+# Output files (regenerated on each run)
+daily_report.md
+daily_report.json
+daily_report_june*.md
+daily_report_june*.json
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Third-party / downloads
+Vibe-Trading-main/
+
+# Session transcripts
+*.jsonl
+*.output
+
+# IDE
+.vscode/
+.idea/
