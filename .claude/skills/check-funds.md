@@ -19,15 +19,11 @@ The Python script handles all data collection and scoring. **Do not** read or mo
 
 Optional: copy `.env.example` to `.env` and add `DEEPSEEK_API_KEY` for higher-quality LLM-based news sentiment. Without it, a local financial lexicon scorer runs automatically.
 
-## The 3 funds
+## Fund configuration
 
-| Code | Name | Type | Amount | Cost NAV | P&L |
-|------|------|------|--------|----------|-----|
-| 012700 | 易方达证券公司ETF联接C | index | ¥8,414.60 | 1.0951 | -1.0% |
-| 026211 | 平安科技精选混合C | active | ¥6,675.72 | 1.8869 | +2.7% |
-| 017994 | 方正富邦远见成长混合C | active | ¥13,851.16 | 1.5230 | -6.4% |
-
-Total capital: ¥33,000. Available cash = 33000 - total_holdings.
+Fund details (codes, amounts, cost basis, sector keywords) are defined in
+`fund_advisor.py`'s `FUNDS` dict and `TOTAL_CAPITAL`. These are personal
+holdings data — modify there, not here.
 
 ## Scoring engine (v3 continuous)
 
