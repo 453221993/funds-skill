@@ -7,6 +7,19 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
+# ── Load .env file (project-local API keys, no dependency needed) ──
+_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.isfile(_ENV_PATH):
+    with open(_ENV_PATH, "r", encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+            if _k and _v and _k not in os.environ:
+                os.environ[_k] = _v
+
 # Clear system proxy before importing HTTP libraries
 for key in list(os.environ.keys()):
     if key.lower().endswith('_proxy'):
