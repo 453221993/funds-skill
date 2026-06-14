@@ -299,13 +299,93 @@ def analyze_sector_news(keywords: list[str], sector_label: str) -> dict:
     }
 
 
-def _score_one_sector(headlines: list[dict], sector_label: str,
-                     notices: Optional[dict[str, list[dict]]] = None) -> float:
-    """Score news sentiment for a single sector via DeepSeek API.
+def _score_one_sector_local(headlines: list[dict]) -> float:
+    """Local financial-news sentiment scorer. No API needed.
 
-    Returns -10 to +10. Falls back to 0 on any error.
-    Each sector is evaluated independently to avoid cross-contamination.
-    If stock_notices provided (for active funds), they are weighted more heavily.
+    Uses a domain-specific Chinese financial lexicon with phrase weights.
+    Handles negation. Returns -5 to +5 (conservative — narrower than LLM).
+    """
+    if not headlines:
+        return 0.0
+
+    # Weighted financial phrases: (phrase, weight, description)
+    # Positive weights: bullish. Negative: bearish.
+    LEXICON = [
+        # ── Strong bullish (+2~+3) ──
+        ("业绩预增", 2.5), ("业绩大幅增长", 3.0), ("净利润大增", 3.0),
+        ("中标", 2.0), ("重大合同", 2.5), ("订单饱满", 2.0),
+        ("突破", 1.5), ("技术突破", 2.5), ("获批", 2.0),
+        ("政策支持", 2.5), ("产业扶持", 2.5), ("补贴", 1.5),
+        ("回购", 2.0), ("增持", 2.0), ("股权激励", 1.5),
+        ("资产注入", 2.5), ("重组获批", 3.0),
+        ("涨价", 1.5), ("供不应求", 2.0), ("景气度提升", 2.5),
+        ("分红", 1.0), ("送转", 1.0), ("高分红", 1.5),
+        ("大涨", 1.0), ("涨停", 1.0),
+        ("超预期", 2.0), ("好于预期", 2.0),
+        ("资金流入", 1.5), ("加仓", 1.0), ("净买入", 1.5),
+
+        # ── Strong bearish (-2~-3) ──
+        ("业绩预亏", -2.5), ("业绩大幅下滑", -3.0), ("净利润大降", -3.0),
+        ("立案调查", -3.0), ("监管函", -2.5), ("警示函", -2.0),
+        ("处罚", -2.5), ("罚款", -2.0), ("通报批评", -2.0),
+        ("减持", -2.0), ("清仓减持", -3.0), ("套现", -2.0),
+        ("业绩变脸", -3.0), ("商誉减值", -3.0), ("计提减值", -2.5),
+        ("退市风险", -3.0), ("终止上市", -3.0),
+        ("跌停", -1.5), ("大跌", -1.0),
+        ("低于预期", -2.0), ("不及预期", -2.0),
+        ("资金流出", -1.5), ("减仓", -1.0), ("净卖出", -1.5),
+        ("诉讼", -1.5), ("仲裁", -1.0),
+        ("大股东质押", -1.5), ("股权冻结", -2.5),
+        ("裁员", -1.5), ("关停", -2.0),
+
+        # ── Mild signals (±0.5~±1.5) ──
+        ("增长", 0.8), ("回暖", 1.0), ("复苏", 1.0),
+        ("创新高", 1.0), ("新高", 0.8),
+        ("扩产", 1.0), ("产能释放", 1.0),
+        ("战略合作", 0.5), ("达成合作", 0.5),
+        ("下滑", -0.8), ("下降", -0.5), ("放缓", -0.5),
+        ("亏损", -1.5), ("连续亏损", -2.0),
+        ("风险提示", -1.0), ("异常波动", -0.5),
+        ("延期", -0.5), ("取消", -1.0),
+        ("流拍", -0.5), ("流标", -0.5),
+    ]
+
+    # Negation patterns that flip sentiment
+    NEGATIONS = ["未能", "无法", "难以", "不再", "没有", "不会", "并未", "尚无"]
+
+    total_score = 0.0
+    hit_count = 0
+
+    for h in headlines:
+        text = f"{h.get('title', '')} {h.get('summary', '')}"
+
+        for phrase, weight in LEXICON:
+            if phrase not in text:
+                continue
+
+            # Check for negation within a window before the phrase
+            pos = text.index(phrase)
+            before = text[max(0, pos - 10):pos]
+            negated = any(neg in before for neg in NEGATIONS)
+            effective = -weight if negated else weight
+
+            total_score += effective
+            hit_count += 1
+
+    if hit_count == 0:
+        return 0.0
+
+    # Average and scale: more hits = more confidence, but cap conservatively
+    raw = total_score / max(1, len(headlines)) * 2  # scale to roughly -5~+5
+    return round(max(-5.0, min(5.0, raw)), 1)
+
+
+def _score_one_sector_llm(headlines: list[dict], sector_label: str,
+                          notices: Optional[dict] = None) -> float:
+    """Score news sentiment via DeepSeek API (higher quality, optional).
+
+    Requires DEEPSEEK_API_KEY in .env or environment.
+    Falls back to _score_one_sector_local() if unavailable.
     """
     if not headlines and not notices:
         return 0.0
@@ -313,11 +393,11 @@ def _score_one_sector(headlines: list[dict], sector_label: str,
     try:
         from openai import OpenAI
     except ImportError:
-        return 0.0
+        return _score_one_sector_local(headlines)
 
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     if not api_key:
-        return 0.0
+        return _score_one_sector_local(headlines)
 
     # Build sector news section
     lines = "\n".join(
@@ -385,7 +465,7 @@ def batch_news_sentiment(fund_news: list[dict]) -> None:
     with ThreadPoolExecutor(max_workers=len(active)) as executor:
         futures = {
             executor.submit(
-                _score_one_sector,
+                _score_one_sector_llm,
                 n["headlines"], n["sector_label"], n.get("notices")
             ): n
             for n in active

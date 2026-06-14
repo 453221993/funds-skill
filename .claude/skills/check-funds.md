@@ -15,7 +15,9 @@ description: Run the fund advisor analysis and present a plain-language daily re
 cd "d:\claudecode\project\投资助手" && python fund_advisor.py --json
 ```
 
-The Python script handles all data collection and scoring. **Do not** read or modify `fund_advisor.py` unless explicitly asked — the scoring engine is deliberately "vibe-trading" (structured intuition, not backtested).
+The Python script handles all data collection and scoring. **Do not** read or modify `fund_advisor.py` unless explicitly asked. The system is fully self-contained — no API keys required out of the box.
+
+Optional: copy `.env.example` to `.env` and add `DEEPSEEK_API_KEY` for higher-quality LLM-based news sentiment. Without it, a local financial lexicon scorer runs automatically.
 
 ## The 3 funds
 
