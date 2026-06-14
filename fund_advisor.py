@@ -246,46 +246,38 @@ def fetch_holdings_notices(stock_codes: list[str]) -> dict[str, list[dict]]:
 
 
 def analyze_sector_news(keywords: list[str], sector_label: str) -> dict:
-    """
-    Fetch financial news, filter by sector keywords, assess sentiment via LLM.
-    Falls back to score_adjust=0 if LLM unavailable.
+    """Fetch financial news, filter by sector keywords. Headlines only.
+
+    News sentiment assessment is done by Claude in the skill report layer,
+    NOT in Python. No API keys, no lexicon, no scoring — just raw headlines.
     """
     df = _fetch_financial_news()
     if df is None or df.empty:
         return {"matched_count": 0, "headlines": [],
-                "score_adjust": 0, "signals": [], "error": "no_news_data"}
+                "signals": [], "error": "no_news_data"}
 
-    # Columns: 标题(0), 摘要(1), 发布时间(2), 链接(3)
     title_col = df.columns[0]
     summary_col = df.columns[1]
     time_col = df.columns[2]
 
-    # ── Date filter: keep only the latest trading day's news ──
+    # Date filter: latest trading day
     df[time_col] = pd.to_datetime(df[time_col])
     latest_date = df[time_col].dt.date.max()
     df = df[df[time_col].dt.date == latest_date]
-    print(f"  News date: {latest_date}")
 
     # Filter by keywords
     pattern = '|'.join(keywords)
     mask = df[title_col].str.contains(pattern, na=False) | df[summary_col].str.contains(pattern, na=False)
     matched = df[mask]
 
-    if matched.empty:
-        return {"matched_count": 0, "headlines": [],
-                "score_adjust": 0, "signals": [f"今日无{sector_label}相关新闻"],
-                "sector_label": sector_label}
-
-    # Extract headlines (up to 15, keep full text for LLM assessment)
     headlines = []
-    for _, row in matched.head(15).iterrows():
-        title = str(row[title_col])[:100]
-        summary = str(row[summary_col])[:120] if pd.notna(row[summary_col]) else ""
-        headlines.append({"title": title, "summary": summary})
+    for _, row in matched.head(10).iterrows():
+        headlines.append({
+            "title": str(row[title_col])[:100],
+            "summary": str(row[summary_col])[:120] if pd.notna(row[summary_col]) else "",
+        })
 
     total = len(matched)
-
-    # Build signals (score_adjust filled later by batch_news_sentiment)
     signals = [f"{sector_label}相关新闻 {total} 条"]
     for h in headlines[:5]:
         signals.append(h["title"])
@@ -293,205 +285,11 @@ def analyze_sector_news(keywords: list[str], sector_label: str) -> dict:
     return {
         "matched_count": total,
         "headlines": headlines,
-        "score_adjust": 0,  # filled by batch_news_sentiment
         "signals": signals,
         "sector_label": sector_label,
     }
 
 
-def _score_one_sector_local(headlines: list[dict]) -> float:
-    """Local financial-news sentiment scorer. No API needed.
-
-    Uses a domain-specific Chinese financial lexicon with phrase weights.
-    Handles negation. Returns -5 to +5 (conservative — narrower than LLM).
-    """
-    if not headlines:
-        return 0.0
-
-    # Weighted financial phrases: (phrase, weight, description)
-    # Positive weights: bullish. Negative: bearish.
-    LEXICON = [
-        # ── Strong bullish (+2~+3) ──
-        ("业绩预增", 2.5), ("业绩大幅增长", 3.0), ("净利润大增", 3.0),
-        ("中标", 2.0), ("重大合同", 2.5), ("订单饱满", 2.0),
-        ("突破", 1.5), ("技术突破", 2.5), ("获批", 2.0),
-        ("政策支持", 2.5), ("产业扶持", 2.5), ("补贴", 1.5),
-        ("回购", 2.0), ("增持", 2.0), ("股权激励", 1.5),
-        ("资产注入", 2.5), ("重组获批", 3.0),
-        ("涨价", 1.5), ("供不应求", 2.0), ("景气度提升", 2.5),
-        ("分红", 1.0), ("送转", 1.0), ("高分红", 1.5),
-        ("大涨", 1.0), ("涨停", 1.0),
-        ("超预期", 2.0), ("好于预期", 2.0),
-        ("资金流入", 1.5), ("加仓", 1.0), ("净买入", 1.5),
-
-        # ── Strong bearish (-2~-3) ──
-        ("业绩预亏", -2.5), ("业绩大幅下滑", -3.0), ("净利润大降", -3.0),
-        ("立案调查", -3.0), ("监管函", -2.5), ("警示函", -2.0),
-        ("处罚", -2.5), ("罚款", -2.0), ("通报批评", -2.0),
-        ("减持", -2.0), ("清仓减持", -3.0), ("套现", -2.0),
-        ("业绩变脸", -3.0), ("商誉减值", -3.0), ("计提减值", -2.5),
-        ("退市风险", -3.0), ("终止上市", -3.0),
-        ("跌停", -1.5), ("大跌", -1.0),
-        ("低于预期", -2.0), ("不及预期", -2.0),
-        ("资金流出", -1.5), ("减仓", -1.0), ("净卖出", -1.5),
-        ("诉讼", -1.5), ("仲裁", -1.0),
-        ("大股东质押", -1.5), ("股权冻结", -2.5),
-        ("裁员", -1.5), ("关停", -2.0),
-
-        # ── Mild signals (±0.5~±1.5) ──
-        ("增长", 0.8), ("回暖", 1.0), ("复苏", 1.0),
-        ("创新高", 1.0), ("新高", 0.8),
-        ("扩产", 1.0), ("产能释放", 1.0),
-        ("战略合作", 0.5), ("达成合作", 0.5),
-        ("下滑", -0.8), ("下降", -0.5), ("放缓", -0.5),
-        ("亏损", -1.5), ("连续亏损", -2.0),
-        ("风险提示", -1.0), ("异常波动", -0.5),
-        ("延期", -0.5), ("取消", -1.0),
-        ("流拍", -0.5), ("流标", -0.5),
-    ]
-
-    # Negation patterns that flip sentiment
-    NEGATIONS = ["未能", "无法", "难以", "不再", "没有", "不会", "并未", "尚无"]
-
-    total_score = 0.0
-    hit_count = 0
-
-    for h in headlines:
-        text = f"{h.get('title', '')} {h.get('summary', '')}"
-
-        for phrase, weight in LEXICON:
-            if phrase not in text:
-                continue
-
-            # Check for negation within a window before the phrase
-            pos = text.index(phrase)
-            before = text[max(0, pos - 10):pos]
-            negated = any(neg in before for neg in NEGATIONS)
-            effective = -weight if negated else weight
-
-            total_score += effective
-            hit_count += 1
-
-    if hit_count == 0:
-        return 0.0
-
-    # Average and scale: more hits = more confidence, but cap conservatively
-    raw = total_score / max(1, len(headlines)) * 2  # scale to roughly -5~+5
-    return round(max(-5.0, min(5.0, raw)), 1)
-
-
-def _score_one_sector_llm(headlines: list[dict], sector_label: str,
-                          notices: Optional[dict] = None) -> float:
-    """Score news sentiment via DeepSeek API (higher quality, optional).
-
-    Requires DEEPSEEK_API_KEY in .env or environment.
-    Falls back to _score_one_sector_local() if unavailable.
-    """
-    if not headlines and not notices:
-        return 0.0
-
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return _score_one_sector_local(headlines)
-
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        return _score_one_sector_local(headlines)
-
-    # Build sector news section
-    lines = "\n".join(
-        f"  - {h['title'][:100]}"
-        for h in headlines[:15]
-    ) if headlines else "（无板块新闻）"
-
-    # Build stock notices section (if any)
-    notice_lines = ""
-    if notices:
-        parts = []
-        for code, ns in notices.items():
-            for n in ns:
-                parts.append(f"  - [{n['stock_name']} {code}] {n['type']}: {n['title'][:80]}")
-        if parts:
-            notice_lines = "\n".join(parts)
-            notice_lines = f"\n\n## 重仓股今日公告（影响比板块新闻更大）：\n{notice_lines}"
-
-    prompt = f"""评估"{sector_label}"板块的今日情绪。请输出一个数字。
-
-## 板块新闻
-{lines}{notice_lines}
-
-规则：
-- 范围 -10（强烈利空）到 +10（强烈利好）
-- 个股公告 > 板块新闻：业绩亏损、监管问询、减持 → 直接往负向拉；重大订单、回购、业绩大增 → 直接往正向拉
-- PR宣传稿、常规合作新闻、路演不算利好
-- 只输出一个数字，不要其他内容"""
-
-    try:
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
-        response = client.chat.completions.create(
-            model="deepseek-v4-pro",
-            messages=[
-                {"role": "system", "content": "你是一个A股新闻情绪分析助手。只输出一个-10到10的数字。"},
-                {"role": "user", "content": prompt},
-            ],
-            stream=False,
-        )
-        text = response.choices[0].message.content.strip()
-
-        import re
-        match = re.search(r'[-]?\d+(?:\.\d+)?', text)
-        if match:
-            return max(-10.0, min(10.0, float(match.group())))
-        return 0.0
-    except Exception as e:
-        print(f"  [WARN] News sentiment for {sector_label} failed: {e}")
-        return 0.0
-
-
-def batch_news_sentiment(fund_news: list[dict]) -> None:
-    """Score news sentiment for all funds — one API call per sector, run in PARALLEL.
-
-    Each entry in fund_news is a dict with keys: code, sector_label, headlines.
-    score_adjust and signals are written back in-place.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    active = [n for n in fund_news if n.get("headlines")]
-    if not active:
-        return
-
-    # Submit all in parallel
-    with ThreadPoolExecutor(max_workers=len(active)) as executor:
-        futures = {
-            executor.submit(
-                _score_one_sector_llm,
-                n["headlines"], n["sector_label"], n.get("notices")
-            ): n
-            for n in active
-        }
-        for future in as_completed(futures):
-            n = futures[future]
-            try:
-                adj = future.result()
-            except Exception:
-                adj = 0.0
-
-            n["score_adjust"] = adj
-
-            # Update signals
-            sector = n["sector_label"]
-            total = n["matched_count"]
-            if adj >= 5:
-                n["signals"][0] = f"{sector}新闻明显偏暖 (+{adj})"
-            elif adj >= 2:
-                n["signals"][0] = f"{sector}新闻略偏暖 (+{adj})"
-            elif adj <= -5:
-                n["signals"][0] = f"{sector}新闻明显偏冷 ({adj})"
-            elif adj <= -2:
-                n["signals"][0] = f"{sector}新闻略偏冷 ({adj})"
-
-# ---------------------------------------------------------------------------
 # Fund NAV Analysis
 # ---------------------------------------------------------------------------
 
@@ -1270,41 +1068,12 @@ def main(json_only: bool = False):
             sector_label=cfg.get("sector_label", ""),
         )
         result["news_analysis"] = news
-        result["stock_notices"] = stock_notices  # attach to result for batch
+        result["stock_notices"] = stock_notices
         print(f"  News: {news.get('matched_count', 0)} matched")
 
-        results.append(result)
-
-    # ── Batch news sentiment (single API call for all funds) ──
-    batch_news = [
-        {
-            "code": r["code"],
-            "sector_label": r["news_analysis"].get("sector_label", ""),
-            "headlines": r["news_analysis"].get("headlines", []),
-            "matched_count": r["news_analysis"].get("matched_count", 0),
-            "signals": r["news_analysis"].get("signals", []),
-            "notices": r.get("stock_notices"),  # individual stock announcements
-        }
-        for r in results
-    ]
-    batch_news_sentiment(batch_news)
-
-    # Apply results back to each fund and run scoring
-    for r, bn in zip(results, batch_news):
-        r["news_analysis"]["score_adjust"] = bn.get("score_adjust", 0)
-        r["news_analysis"]["signals"] = bn.get("signals", [])
-        news = r["news_analysis"]
-        code = r["code"]
-        cfg = FUNDS[code]
-        nav = r.get("nav_analysis")
-        idx = r.get("index_analysis")
-        stock_results = r.get("stock_analysis")
-
-        print(f"  {code} news sentiment: {news.get('score_adjust', 0):+.1f}")
-
-        # 5) Suggestion
+        # 5) Suggestion (news is context-only, no score_adjust)
         sug = generate_suggestion(nav, idx, stock_results, news, cfg["type"])
-        r["suggestion"] = sug
+        result["suggestion"] = sug
 
         # 6) Position sizing
         total_holdings = sum(f["amount"] for f in FUNDS.values())
@@ -1318,11 +1087,11 @@ def main(json_only: bool = False):
             total_capital=TOTAL_CAPITAL,
             total_holdings=total_holdings,
         )
-        r["sizing"] = sizing
+        result["sizing"] = sizing
 
         # 7) Next-day prediction
         pred = predict_next_day(nav, idx, stock_results, news)
-        r["prediction"] = pred
+        result["prediction"] = pred
 
         print(f"  >>> {sug['action_cn']} (score: {sug['score']}/100)")
         if sug["reasons_bull"]:
@@ -1330,7 +1099,9 @@ def main(json_only: bool = False):
         if sug["reasons_bear"]:
             print(f"  >>> Bear: {' | '.join(sug['reasons_bear'])}")
 
-    # 5) Save JSON (always). Generate report only if not --json mode.
+        results.append(result)
+
+    # 8) Save JSON (always). Generate report only if not --json mode.
     json_path = os.path.join(OUTPUT_DIR, "daily_report.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2, default=str)
